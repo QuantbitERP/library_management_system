@@ -108,7 +108,7 @@ def build_schedule(tickets):
                 "hours": float(ticket["hours"]),
             })
 
-    # schedule_entries[customer][user][date] = ["T1", "T2"]
+    # schedule_entries[customer][user][date] = [{"ticket": "HDT-0001", "hours": 6}]
     schedule_entries = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     all_dates = set()
 
@@ -141,7 +141,10 @@ def build_schedule(tickets):
                 allocated = min(remaining_hours, available_today)
 
                 date_key = current_dt.date().strftime("%Y-%m-%d")
-                schedule_entries[task["customer"]][user][date_key].append(task["ticket"])
+                schedule_entries[task["customer"]][user][date_key].append({
+                    "ticket": task["ticket"],
+                    "hours": allocated
+                })
                 all_dates.add(date_key)
 
                 current_dt = add_hours(current_dt, allocated)
@@ -200,6 +203,19 @@ def scrub_fieldname(value):
     return value.replace("-", "_")
 
 
+def format_hours(hours):
+    if float(hours).is_integer():
+        return str(int(hours))
+    return f"{hours:.2f}".rstrip("0").rstrip(".")
+
+
+def format_items(items):
+    return ", ".join([
+        item["ticket"] + "(" + format_hours(item["hours"]) + "h)"
+        for item in items
+    ])
+
+
 def get_columns(all_dates):
     columns = [
         {
@@ -241,7 +257,7 @@ def get_columns(all_dates):
             "label": frappe.utils.formatdate(date_str),
             "fieldname": scrub_fieldname(date_str),
             "fieldtype": "Data",
-            "width": 180,
+            "width": 220,
         })
 
     return columns
@@ -272,10 +288,12 @@ def get_customer_wise_data(schedule_entries, all_dates):
 
         for date_str in all_dates:
             fieldname = scrub_fieldname(date_str)
-            summary_tickets = []
+            summary_items = []
+
             for user in sorted(schedule_entries[customer].keys()):
-                summary_tickets.extend(schedule_entries[customer][user].get(date_str, []))
-            parent_row[fieldname] = ", ".join(summary_tickets)
+                summary_items.extend(schedule_entries[customer][user].get(date_str, []))
+
+            parent_row[fieldname] = format_items(summary_items)
 
         data.append(parent_row)
 
@@ -290,8 +308,8 @@ def get_customer_wise_data(schedule_entries, all_dates):
 
             for date_str in all_dates:
                 fieldname = scrub_fieldname(date_str)
-                tickets = schedule_entries[customer][user].get(date_str, [])
-                child_row[fieldname] = ", ".join(tickets)
+                items = schedule_entries[customer][user].get(date_str, [])
+                child_row[fieldname] = format_items(items)
 
             data.append(child_row)
 
@@ -306,7 +324,9 @@ def get_user_wise_data(schedule_entries, all_dates):
     for customer in schedule_entries:
         for user in schedule_entries[customer]:
             for date_str in schedule_entries[customer][user]:
-                user_map[user][customer][date_str].extend(schedule_entries[customer][user][date_str])
+                user_map[user][customer][date_str].extend(
+                    schedule_entries[customer][user][date_str]
+                )
 
     for user in sorted(user_map.keys()):
         parent_row_id = f"USER::{user}"
@@ -321,10 +341,12 @@ def get_user_wise_data(schedule_entries, all_dates):
 
         for date_str in all_dates:
             fieldname = scrub_fieldname(date_str)
-            summary_tickets = []
+            summary_items = []
+
             for customer in sorted(user_map[user].keys()):
-                summary_tickets.extend(user_map[user][customer].get(date_str, []))
-            parent_row[fieldname] = ", ".join(summary_tickets)
+                summary_items.extend(user_map[user][customer].get(date_str, []))
+
+            parent_row[fieldname] = format_items(summary_items)
 
         data.append(parent_row)
 
@@ -339,8 +361,8 @@ def get_user_wise_data(schedule_entries, all_dates):
 
             for date_str in all_dates:
                 fieldname = scrub_fieldname(date_str)
-                tickets = user_map[user][customer].get(date_str, [])
-                child_row[fieldname] = ", ".join(tickets)
+                items = user_map[user][customer].get(date_str, [])
+                child_row[fieldname] = format_items(items)
 
             data.append(child_row)
 
