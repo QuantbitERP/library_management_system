@@ -7,7 +7,6 @@
 // 	]
 // };
 
-
 frappe.query_reports["Project Timeline"] = {
 	filters: [
 		{
@@ -32,5 +31,10 @@ frappe.query_reports["Project Timeline"] = {
 			fieldtype: "Link",
 			options: "User"
 		}
-	]
+	],
+
+	tree: true,
+	name_field: "row_id",
+	parent_field: "parent_row",
+	initial_depth: 1
 };

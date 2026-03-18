@@ -12,6 +12,9 @@
 # Copyright (c) 2026
 # For license information, please see license.txt
 
+# Copyright (c) 2026, Vaibhav and contributors
+# For license information, please see license.txt
+
 import frappe
 import json
 from collections import defaultdict
@@ -26,7 +29,7 @@ def execute(filters=None):
     filters = filters or {}
 
     tickets = get_tickets(filters)
-    schedule_entries, all_dates = build_schedule(tickets, filters)
+    schedule_entries, all_dates = build_schedule(tickets)
 
     columns = get_columns(all_dates)
     data = get_data(schedule_entries, all_dates)
@@ -74,9 +77,8 @@ def get_tickets(filters):
         if not assigned_users:
             continue
 
-        if filters.get("assigned_to"):
-            if filters.get("assigned_to") not in assigned_users:
-                continue
+        if filters.get("assigned_to") and filters.get("assigned_to") not in assigned_users:
+            continue
 
         cleaned.append({
             "ticket": row.name,
@@ -103,9 +105,9 @@ def parse_assign(assign_value):
     return []
 
 
-def build_schedule(tickets, filters):
+def build_schedule(tickets):
     """
-    Final business rules implemented:
+    Final business rules:
     1. Sort tickets by creation ascending
     2. For multi-user assignment, EACH assigned user gets full task hours
     3. Each user has own queue
@@ -125,19 +127,17 @@ def build_schedule(tickets, filters):
                 "hours": float(ticket["hours"]),
             })
 
-    # schedule_entries[customer][date] = ["x(T1:2.5)", "y(T2:4)"]
-    schedule_entries = defaultdict(lambda: defaultdict(list))
+    # schedule_entries[customer][user][date] = ["T1", "T2"]
+    schedule_entries = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     all_dates = set()
 
     for user, queue in user_queues.items():
         queue.sort(key=lambda x: (x["creation"], x["ticket"]))
-
         current_dt = None
 
         for task in queue:
             remaining_hours = float(task["hours"])
 
-            # user cannot start task before task creation
             if current_dt is None:
                 current_dt = normalize_start_datetime(task["creation"])
             else:
@@ -156,10 +156,9 @@ def build_schedule(tickets, filters):
                 allocated = min(remaining_hours, available_today)
 
                 date_key = current_dt.date().strftime("%Y-%m-%d")
-                hours_text = format_hours(allocated)
-                schedule_entries[task["customer"]][date_key].append(
-                    f"{user}({task['ticket']}:{hours_text})"
-                )
+
+                # show ticket no in date column
+                schedule_entries[task["customer"]][user][date_key].append(task["ticket"])
                 all_dates.add(date_key)
 
                 current_dt = add_hours(current_dt, allocated)
@@ -175,11 +174,6 @@ def ensure_datetime(value):
 
 
 def normalize_start_datetime(dt):
-    """
-    If task created before work start, schedule from day start.
-    If created during work hours, use actual creation time.
-    If created after work hours, move to next workday start.
-    """
     dt = ensure_datetime(dt)
     day_start = datetime.combine(dt.date(), time(DAY_START_HOUR, DAY_START_MINUTE))
     day_end = get_day_end(day_start)
@@ -226,21 +220,45 @@ def add_hours(dt, hours):
     return ensure_datetime(dt) + timedelta(hours=hours)
 
 
-def format_hours(hours):
-    if float(hours).is_integer():
-        return str(int(hours))
-    return f"{hours:.2f}".rstrip("0").rstrip(".")
+def scrub_fieldname(value):
+    return value.replace("-", "_")
 
 
 def get_columns(all_dates):
     columns = [
+        # helper fields for tree/collapse
+        {
+            "label": "Row ID",
+            "fieldname": "row_id",
+            "fieldtype": "Data",
+            "hidden": 1,
+        },
+        {
+            "label": "Parent Row",
+            "fieldname": "parent_row",
+            "fieldtype": "Data",
+            "hidden": 1,
+        },
+        {
+            "label": "Indent",
+            "fieldname": "indent",
+            "fieldtype": "Int",
+            "hidden": 1,
+        },
         {
             "label": "Customer",
             "fieldname": "customer",
             "fieldtype": "Link",
-            "options": "Customer",
-            "width": 180,
-        }
+            "options": "HD Customer",
+            "width": 220,
+        },
+        {
+            "label": "User",
+            "fieldname": "user",
+            "fieldtype": "Link",
+            "options": "User",
+            "width": 220,
+        },
     ]
 
     for date_str in all_dates:
@@ -248,7 +266,7 @@ def get_columns(all_dates):
             "label": frappe.utils.formatdate(date_str),
             "fieldname": scrub_fieldname(date_str),
             "fieldtype": "Data",
-            "width": 220,
+            "width": 180,
         })
 
     return columns
@@ -258,17 +276,41 @@ def get_data(schedule_entries, all_dates):
     data = []
 
     for customer in sorted(schedule_entries.keys()):
-        row = {"customer": customer}
+        # parent row = customer
+        parent_row_id = f"CUST::{customer}"
+        parent_row = {
+            "row_id": parent_row_id,
+            "parent_row": "",
+            "indent": 0,
+            "customer": customer,
+            "user": "",
+        }
 
+        # optional summary on parent row
         for date_str in all_dates:
             fieldname = scrub_fieldname(date_str)
-            values = schedule_entries[customer].get(date_str, [])
-            row[fieldname] = ", ".join(values)
+            summary_tickets = []
+            for user in sorted(schedule_entries[customer].keys()):
+                summary_tickets.extend(schedule_entries[customer][user].get(date_str, []))
+            parent_row[fieldname] = ", ".join(summary_tickets)
 
-        data.append(row)
+        data.append(parent_row)
+
+        # child rows = users under customer
+        for user in sorted(schedule_entries[customer].keys()):
+            child_row = {
+                "row_id": f"{parent_row_id}::USER::{user}",
+                "parent_row": parent_row_id,
+                "indent": 1,
+                "customer": "",
+                "user": user,
+            }
+
+            for date_str in all_dates:
+                fieldname = scrub_fieldname(date_str)
+                tickets = schedule_entries[customer][user].get(date_str, [])
+                child_row[fieldname] = ", ".join(tickets)
+
+            data.append(child_row)
 
     return data
-
-
-def scrub_fieldname(value):
-    return value.replace("-", "_")
