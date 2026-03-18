@@ -1,13 +1,3 @@
-# # Copyright (c) 2026, Vaibhav and contributors
-# # For license information, please see license.txt
-
-# # import frappe
-
-
-# def execute(filters=None):
-# 	columns, data = [], []
-# 	return columns, data
-
 # Copyright (c) 2026, Vaibhav and contributors
 # For license information, please see license.txt
 
@@ -103,6 +93,7 @@ def build_schedule(tickets):
     3. After that, priority by creation ASC
     4. If multiple users assigned, each user gets full task hours separately
     5. User finishes current task first, then next
+    6. Remaining same-day hours can be used for next task
     """
 
     user_queues = defaultdict(list)
@@ -126,7 +117,7 @@ def build_schedule(tickets):
     for user, queue in user_queues.items():
         queue.sort(
             key=lambda x: (
-                0 if cstr(x["status"]).lower() == "working" else 1,
+                0 if str(x.get("status") or "").strip().lower() == "working" else 1,
                 x["creation"],
                 x["ticket"]
             )
