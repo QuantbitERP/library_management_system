@@ -14,13 +14,39 @@ DAY_START_MINUTE = 0
 def execute(filters=None):
     filters = filters or {}
 
+    holiday_map = get_holiday_map(filters)
     tickets = get_tickets(filters)
-    schedule_entries, all_dates = build_schedule(tickets)
+    schedule_entries, all_dates = build_schedule(tickets, holiday_map)
 
-    columns = get_columns(all_dates)
-    data = get_data(schedule_entries, all_dates, filters)
+    columns = get_columns(all_dates, holiday_map)
+    data = get_data(schedule_entries, all_dates, filters, holiday_map)
 
     return columns, data
+
+
+def get_holiday_map(filters):
+    holiday_map = {}
+
+    company = frappe.defaults.get_user_default("Company") or frappe.defaults.get_user_default("company")
+    if not company:
+        return holiday_map
+
+    holiday_list = frappe.db.get_value("Company", company, "default_holiday_list")
+    if not holiday_list:
+        return holiday_map
+
+    holidays = frappe.get_all(
+        "Holiday",
+        filters={"parent": holiday_list},
+        fields=["holiday_date", "description"],
+        order_by="holiday_date asc"
+    )
+
+    for row in holidays:
+        if row.get("holiday_date"):
+            holiday_map[str(row["holiday_date"])] = row.get("description") or "Holiday"
+
+    return holiday_map
 
 
 def get_tickets(filters):
@@ -85,7 +111,7 @@ def parse_assign(assign_value):
     return []
 
 
-def build_schedule(tickets):
+def build_schedule(tickets, holiday_map):
     """
     Rules:
     1. Plan from today onward
@@ -94,6 +120,7 @@ def build_schedule(tickets):
     4. If multiple users assigned, each user gets full task hours separately
     5. User finishes current task first, then next
     6. Remaining same-day hours can be used for next task
+    7. Holidays are skipped for planning
     """
 
     user_queues = defaultdict(list)
@@ -129,13 +156,13 @@ def build_schedule(tickets):
             remaining_hours = float(task["hours"])
 
             while remaining_hours > 0:
-                current_dt = move_to_working_time(current_dt)
+                current_dt = move_to_working_time(current_dt, holiday_map)
 
                 day_end = get_day_end(current_dt)
                 available_today = hours_between(current_dt, day_end)
 
                 if available_today <= 0:
-                    current_dt = next_workday_start(current_dt)
+                    current_dt = next_workday_start(current_dt, holiday_map)
                     continue
 
                 allocated = min(remaining_hours, available_today)
@@ -149,6 +176,8 @@ def build_schedule(tickets):
 
                 current_dt = add_hours(current_dt, allocated)
                 remaining_hours -= allocated
+
+    all_dates = add_holiday_dates_in_range(all_dates, holiday_map)
 
     return schedule_entries, sorted(all_dates)
 
@@ -175,22 +204,38 @@ def get_day_end(dt):
     return add_hours(day_start, WORKING_HOURS_PER_DAY)
 
 
-def move_to_working_time(dt):
+def is_holiday(dt, holiday_map):
+    date_str = ensure_datetime(dt).date().strftime("%Y-%m-%d")
+    return date_str in holiday_map
+
+
+def move_to_working_time(dt, holiday_map):
     dt = ensure_datetime(dt)
-    day_start = datetime.combine(dt.date(), time(DAY_START_HOUR, DAY_START_MINUTE))
-    day_end = get_day_end(day_start)
 
-    if dt < day_start:
-        return day_start
+    while True:
+        day_start = datetime.combine(dt.date(), time(DAY_START_HOUR, DAY_START_MINUTE))
+        day_end = get_day_end(day_start)
 
-    if dt >= day_end:
-        return next_workday_start(dt)
+        if is_holiday(dt, holiday_map):
+            dt = next_workday_start(dt, holiday_map)
+            continue
 
-    return dt
+        if dt < day_start:
+            return day_start
+
+        if dt >= day_end:
+            dt = next_workday_start(dt, holiday_map)
+            continue
+
+        return dt
 
 
-def next_workday_start(dt):
+def next_workday_start(dt, holiday_map):
     next_day = ensure_datetime(dt).date() + timedelta(days=1)
+
+    while str(next_day) in holiday_map:
+        next_day = next_day + timedelta(days=1)
+
     return datetime.combine(next_day, time(DAY_START_HOUR, DAY_START_MINUTE))
 
 
@@ -216,7 +261,27 @@ def format_items(items):
     ])
 
 
-def get_columns(all_dates):
+def add_holiday_dates_in_range(all_dates, holiday_map):
+    if not all_dates:
+        return sorted(list(set(holiday_map.keys())))
+
+    all_date_list = sorted(list(all_dates))
+    start_date = frappe.utils.getdate(all_date_list[0])
+    end_date = frappe.utils.getdate(all_date_list[-1])
+
+    date_set = set(all_dates)
+
+    current = start_date
+    while current <= end_date:
+        date_str = str(current)
+        if date_str in holiday_map:
+            date_set.add(date_str)
+        current = current + timedelta(days=1)
+
+    return sorted(list(date_set))
+
+
+def get_columns(all_dates, holiday_map):
     columns = [
         {
             "label": "Row ID",
@@ -253,8 +318,12 @@ def get_columns(all_dates):
     ]
 
     for date_str in all_dates:
+        label = frappe.utils.formatdate(date_str)
+        if date_str in holiday_map:
+            label = label + " (Holiday)"
+
         columns.append({
-            "label": frappe.utils.formatdate(date_str),
+            "label": label,
             "fieldname": scrub_fieldname(date_str),
             "fieldtype": "Data",
             "width": 220,
@@ -263,16 +332,16 @@ def get_columns(all_dates):
     return columns
 
 
-def get_data(schedule_entries, all_dates, filters):
+def get_data(schedule_entries, all_dates, filters, holiday_map):
     view_by = filters.get("view_by") or "Customer"
 
     if view_by == "User":
-        return get_user_wise_data(schedule_entries, all_dates)
+        return get_user_wise_data(schedule_entries, all_dates, holiday_map)
 
-    return get_customer_wise_data(schedule_entries, all_dates)
+    return get_customer_wise_data(schedule_entries, all_dates, holiday_map)
 
 
-def get_customer_wise_data(schedule_entries, all_dates):
+def get_customer_wise_data(schedule_entries, all_dates, holiday_map):
     data = []
 
     for customer in sorted(schedule_entries.keys()):
@@ -288,12 +357,14 @@ def get_customer_wise_data(schedule_entries, all_dates):
 
         for date_str in all_dates:
             fieldname = scrub_fieldname(date_str)
-            summary_items = []
 
-            for user in sorted(schedule_entries[customer].keys()):
-                summary_items.extend(schedule_entries[customer][user].get(date_str, []))
-
-            parent_row[fieldname] = format_items(summary_items)
+            if date_str in holiday_map:
+                parent_row[fieldname] = "Holiday"
+            else:
+                summary_items = []
+                for user in sorted(schedule_entries[customer].keys()):
+                    summary_items.extend(schedule_entries[customer][user].get(date_str, []))
+                parent_row[fieldname] = format_items(summary_items)
 
         data.append(parent_row)
 
@@ -308,15 +379,19 @@ def get_customer_wise_data(schedule_entries, all_dates):
 
             for date_str in all_dates:
                 fieldname = scrub_fieldname(date_str)
-                items = schedule_entries[customer][user].get(date_str, [])
-                child_row[fieldname] = format_items(items)
+
+                if date_str in holiday_map:
+                    child_row[fieldname] = "Holiday"
+                else:
+                    items = schedule_entries[customer][user].get(date_str, [])
+                    child_row[fieldname] = format_items(items)
 
             data.append(child_row)
 
     return data
 
 
-def get_user_wise_data(schedule_entries, all_dates):
+def get_user_wise_data(schedule_entries, all_dates, holiday_map):
     data = []
 
     user_map = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -341,12 +416,14 @@ def get_user_wise_data(schedule_entries, all_dates):
 
         for date_str in all_dates:
             fieldname = scrub_fieldname(date_str)
-            summary_items = []
 
-            for customer in sorted(user_map[user].keys()):
-                summary_items.extend(user_map[user][customer].get(date_str, []))
-
-            parent_row[fieldname] = format_items(summary_items)
+            if date_str in holiday_map:
+                parent_row[fieldname] = "Holiday"
+            else:
+                summary_items = []
+                for customer in sorted(user_map[user].keys()):
+                    summary_items.extend(user_map[user][customer].get(date_str, []))
+                parent_row[fieldname] = format_items(summary_items)
 
         data.append(parent_row)
 
@@ -361,8 +438,12 @@ def get_user_wise_data(schedule_entries, all_dates):
 
             for date_str in all_dates:
                 fieldname = scrub_fieldname(date_str)
-                items = user_map[user][customer].get(date_str, [])
-                child_row[fieldname] = format_items(items)
+
+                if date_str in holiday_map:
+                    child_row[fieldname] = "Holiday"
+                else:
+                    items = user_map[user][customer].get(date_str, [])
+                    child_row[fieldname] = format_items(items)
 
             data.append(child_row)
 
